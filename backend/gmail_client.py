@@ -1,4 +1,8 @@
-"""Gmail API client — data layer only, no HTTP concerns."""
+"""Gmail API client — data layer only, no HTTP concerns.
+
+Supports multiple authenticated accounts. Each account's OAuth token is stored
+as token_{email}.json in the same directory as this file.
+"""
 
 import base64
 import logging
@@ -11,54 +15,87 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
-TOKEN_PATH = Path(__file__).parent / "token.json"
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+TOKEN_DIR = Path(__file__).parent
+CREDENTIALS_PATH = TOKEN_DIR / "credentials.json"
 
 logger = logging.getLogger(__name__)
 
 
-def get_credentials() -> Credentials:
-    """Load cached credentials or run OAuth flow to get new ones."""
-    creds: Credentials | None = None
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
 
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+def _token_path(email: str) -> Path:
+    return TOKEN_DIR / f"token_{email}.json"
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_PATH.exists():
-                raise FileNotFoundError(
-                    f"credentials.json not found at {CREDENTIALS_PATH}. "
-                    "Download it from Google Cloud Console → APIs & Services → Credentials."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
 
-        TOKEN_PATH.write_text(creds.to_json())
-        logger.info("Saved OAuth token to %s", TOKEN_PATH)
-
+def _load_creds(email: str) -> Credentials:
+    """Load and auto-refresh credentials for a given account."""
+    path = _token_path(email)
+    creds = Credentials.from_authorized_user_file(str(path), SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        path.write_text(creds.to_json())
     return creds
 
 
-def _build_service():
-    """Build and return an authenticated Gmail API service object."""
-    return build("gmail", "v1", credentials=get_credentials())
+def _service(email: str):
+    """Return an authenticated Gmail API service for the given account."""
+    return build("gmail", "v1", credentials=_load_creds(email))
+
+
+def list_accounts() -> list[str]:
+    """Return email addresses of all authenticated accounts (from token files)."""
+    accounts = []
+    for token_file in sorted(TOKEN_DIR.glob("token_*.json")):
+        email = token_file.stem[len("token_"):]
+        accounts.append(email)
+    return accounts
+
+
+def authenticate_new_account() -> str:
+    """Run the OAuth browser flow for a new account and persist the token.
+
+    Blocking — must be called from a thread, not the async event loop.
+    Returns the authenticated email address.
+    """
+    if not CREDENTIALS_PATH.exists():
+        raise FileNotFoundError(
+            f"credentials.json not found at {CREDENTIALS_PATH}. "
+            "Download it from Google Cloud Console → APIs & Services → Credentials."
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
+    creds = flow.run_local_server(port=0)
+
+    svc = build("gmail", "v1", credentials=creds)
+    profile = svc.users().getProfile(userId="me").execute()
+    email: str = profile["emailAddress"]
+
+    _token_path(email).write_text(creds.to_json())
+    logger.info("Authenticated new account: %s", email)
+    return email
 
 
 # ---------------------------------------------------------------------------
 # Label helpers
 # ---------------------------------------------------------------------------
 
-def fetch_labels() -> list[dict[str, str]]:
-    """Return all user-created Gmail labels as [{id, name}]."""
-    result = _build_service().users().labels().list(userId="me").execute()
+def fetch_labels(account: str) -> list[dict[str, str]]:
+    """Return all user-created labels for one account as [{id, name, account}]."""
+    result = _service(account).users().labels().list(userId="me").execute()
     return [
-        {"id": lbl["id"], "name": lbl["name"]}
+        {"id": lbl["id"], "name": lbl["name"], "account": account}
         for lbl in result.get("labels", [])
         if lbl.get("type") == "user"
     ]
+
+
+def fetch_all_labels() -> list[dict[str, str]]:
+    """Merge labels from every authenticated account."""
+    merged = []
+    for account in list_accounts():
+        merged.extend(fetch_labels(account))
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +104,6 @@ def fetch_labels() -> list[dict[str, str]]:
 
 def _decode_b64(data: str) -> str:
     """Decode a base64url-encoded Gmail body string."""
-    # Gmail uses base64url without padding; add padding before decoding.
     padded = data + "=" * (-len(data) % 4)
     return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
 
@@ -89,14 +125,12 @@ def _extract_body(payload: dict[str, Any]) -> tuple[str, bool]:
     if mime.startswith("multipart/"):
         parts = payload.get("parts", [])
 
-        # First pass — prefer plain text
         for part in parts:
             if part.get("mimeType") == "text/plain":
                 raw = part.get("body", {}).get("data", "")
                 if raw:
                     return _decode_b64(raw), False
 
-        # Second pass — accept HTML, recurse into nested multipart
         for part in parts:
             if part.get("mimeType") == "text/html":
                 raw = part.get("body", {}).get("data", "")
@@ -111,7 +145,6 @@ def _extract_body(payload: dict[str, Any]) -> tuple[str, bool]:
 
 
 def _parse_headers(headers: list[dict[str, str]]) -> dict[str, str]:
-    """Pull From / Subject / Date from the raw header list."""
     return {
         h["name"].lower(): h["value"]
         for h in headers
@@ -119,11 +152,10 @@ def _parse_headers(headers: list[dict[str, str]]) -> dict[str, str]:
     }
 
 
-def fetch_next_untagged_email() -> dict[str, Any] | None:
-    """Return the oldest unarchived inbox email with no user labels, or None."""
-    service = _build_service()
-
-    page = service.users().messages().list(
+def _fetch_next_for_account(account: str) -> dict[str, Any] | None:
+    """Return the next untagged inbox email for a single account, or None."""
+    svc = _service(account)
+    page = svc.users().messages().list(
         userId="me",
         q="in:inbox -has:userlabels",
         maxResults=1,
@@ -134,11 +166,7 @@ def fetch_next_untagged_email() -> dict[str, Any] | None:
         return None
 
     msg_id = messages[0]["id"]
-    message = service.users().messages().get(
-        userId="me",
-        id=msg_id,
-        format="full",
-    ).execute()
+    message = svc.users().messages().get(userId="me", id=msg_id, format="full").execute()
 
     payload = message.get("payload", {})
     headers = _parse_headers(payload.get("headers", []))
@@ -146,6 +174,7 @@ def fetch_next_untagged_email() -> dict[str, Any] | None:
 
     return {
         "id": msg_id,
+        "account": account,
         "from": headers.get("from", ""),
         "subject": headers.get("subject", "(no subject)"),
         "date": headers.get("date", ""),
@@ -155,9 +184,18 @@ def fetch_next_untagged_email() -> dict[str, Any] | None:
     }
 
 
-def apply_label_and_archive(email_id: str, label_id: str) -> None:
+def fetch_next_untagged_email() -> dict[str, Any] | None:
+    """Return the next untagged inbox email across all authenticated accounts."""
+    for account in list_accounts():
+        email = _fetch_next_for_account(account)
+        if email:
+            return email
+    return None
+
+
+def apply_label_and_archive(email_id: str, label_id: str, account: str) -> None:
     """Add a user label to an email and remove it from the inbox."""
-    _build_service().users().messages().modify(
+    _service(account).users().messages().modify(
         userId="me",
         id=email_id,
         body={
@@ -165,4 +203,4 @@ def apply_label_and_archive(email_id: str, label_id: str) -> None:
             "removeLabelIds": ["INBOX"],
         },
     ).execute()
-    logger.info("Email %s → label %s, archived", email_id, label_id)
+    logger.info("Email %s → label %s, archived (%s)", email_id, label_id, account)

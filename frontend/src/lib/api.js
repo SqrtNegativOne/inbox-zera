@@ -13,6 +13,10 @@ async function request(path, options = {}) {
   return res.json()
 }
 
+export async function fetchAccounts() {
+  return request('/accounts')
+}
+
 export async function fetchLabels() {
   return request('/labels')
 }
@@ -21,10 +25,10 @@ export async function fetchNextEmail() {
   return request('/emails/next')
 }
 
-export async function classifyEmail(emailId, labelId) {
+export async function classifyEmail(emailId, labelId, account) {
   return request(`/emails/${emailId}/classify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label_id: labelId }),
+    body: JSON.stringify({ label_id: labelId, account }),
   })
 }

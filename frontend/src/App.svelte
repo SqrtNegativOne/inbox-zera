@@ -1,18 +1,30 @@
 <script>
   import { onMount } from 'svelte'
   import EmailView from './lib/EmailView.svelte'
-  import { fetchLabels, fetchNextEmail, classifyEmail } from './lib/api.js'
+  import { fetchAccounts, fetchLabels, fetchNextEmail, classifyEmail } from './lib/api.js'
 
-  /** @type {'loading' | 'ready' | 'empty' | 'error'} */
+  /** @type {'loading' | 'ready' | 'empty' | 'error' | 'no-accounts'} */
   let status = $state('loading')
   let email = $state(null)
-  let labels = $state([])
+  let allLabels = $state([])
+  let accountCount = $state(0)
   let errorMsg = $state('')
   let visible = $state(false)
 
+  /** Labels belonging to the current email's account only. */
+  let activeLabels = $derived(
+    email ? allLabels.filter(l => l.account === email.account) : []
+  )
+
   onMount(async () => {
     try {
-      labels = await fetchLabels()
+      const accounts = await fetchAccounts()
+      accountCount = accounts.length
+      if (accountCount === 0) {
+        status = 'no-accounts'
+        return
+      }
+      allLabels = await fetchLabels()
       await advance()
     } catch (err) {
       status = 'error'
@@ -22,7 +34,7 @@
 
   async function advance() {
     visible = false
-    await tick(80)  // let fade-out finish before swapping content
+    await tick(80)
     status = 'loading'
 
     const next = await fetchNextEmail()
@@ -33,7 +45,7 @@
 
     email = next
     status = 'ready'
-    await tick(30)  // one frame before fade-in so transition is visible
+    await tick(30)
     visible = true
   }
 
@@ -42,7 +54,7 @@
     try {
       visible = false
       await tick(300)
-      await classifyEmail(email.id, labelId)
+      await classifyEmail(email.id, labelId, email.account)
       await advance()
     } catch (err) {
       status = 'error'
@@ -57,8 +69,8 @@
   function onKeydown(e) {
     if (status !== 'ready') return
     const idx = parseInt(e.key, 10) - 1
-    if (idx >= 0 && idx < labels.length) {
-      onLabel(labels[idx].id)
+    if (idx >= 0 && idx < activeLabels.length) {
+      onLabel(activeLabels[idx].id)
     }
   }
 </script>
@@ -68,14 +80,15 @@
 <main>
   {#if status === 'error'}
     <p class="ghost error">{errorMsg}</p>
+  {:else if status === 'no-accounts'}
+    <p class="ghost">no accounts — <code>POST /api/accounts</code> to authenticate</p>
   {:else if status === 'empty'}
     <p class="ghost">inbox zero</p>
   {:else if status === 'ready' && email}
     <div class="wrapper" class:visible>
-      <EmailView {email} {labels} {onLabel} />
+      <EmailView {email} labels={activeLabels} {onLabel} multiAccount={accountCount > 1} />
     </div>
   {/if}
-  <!-- status === 'loading' renders nothing — screen stays calm during transitions -->
 </main>
 
 <style>
@@ -90,6 +103,7 @@
   .wrapper {
     opacity: 0;
     transition: opacity 280ms ease;
+    width: 100%;
   }
 
   .wrapper.visible {
@@ -104,6 +118,14 @@
     color: #b0a89e;
     margin-top: 48vh;
     transform: translateY(-50%);
+  }
+
+  .ghost code {
+    font-size: 0.8rem;
+    background: #e8e2d8;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0;
   }
 
   .error {

@@ -1,5 +1,6 @@
 """FastAPI server — HTTP layer only, no Gmail logic here."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,13 +20,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Trigger OAuth on startup so the browser flow happens before the UI opens."""
-    logger.info("Authenticating with Gmail…")
-    try:
-        gmail_client.get_credentials()
-        logger.info("Gmail auth OK.")
-    except FileNotFoundError as exc:
-        logger.error(str(exc))
+    accounts = gmail_client.list_accounts()
+    if not accounts:
+        logger.info("No accounts found. POST /api/accounts to authenticate your first account.")
+    else:
+        logger.info("Loaded accounts: %s", accounts)
     yield
 
 
@@ -41,24 +40,43 @@ app.add_middleware(
 
 class ClassifyBody(BaseModel):
     label_id: str
+    account: str
 
 
 def _raise(exc: Exception) -> None:
     raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/accounts")
+async def list_accounts() -> list[str]:
+    """All authenticated Gmail accounts."""
+    return gmail_client.list_accounts()
+
+
+@app.post("/api/accounts")
+async def add_account() -> dict[str, str]:
+    """Open a browser OAuth flow to authenticate a new Gmail account.
+    Blocks until the user completes the flow.
+    """
+    try:
+        email = await asyncio.to_thread(gmail_client.authenticate_new_account)
+        return {"email": email}
+    except Exception as exc:
+        _raise(exc)
+
+
 @app.get("/api/labels")
 async def list_labels() -> list[dict[str, str]]:
-    """All user-created Gmail labels."""
+    """All user-created labels across every authenticated account."""
     try:
-        return gmail_client.fetch_labels()
+        return gmail_client.fetch_all_labels()
     except Exception as exc:
         _raise(exc)
 
 
 @app.get("/api/emails/next")
 async def next_email() -> dict[str, Any] | None:
-    """Next inbox email with no user labels. Returns null when inbox is clear."""
+    """Next inbox email with no user labels. Returns null when all inboxes are clear."""
     try:
         return gmail_client.fetch_next_untagged_email()
     except Exception as exc:
@@ -67,9 +85,9 @@ async def next_email() -> dict[str, Any] | None:
 
 @app.post("/api/emails/{email_id}/classify")
 async def classify_email(email_id: str, body: ClassifyBody) -> dict[str, str]:
-    """Apply a label and archive the email."""
+    """Apply a label and archive the email, using the correct account's service."""
     try:
-        gmail_client.apply_label_and_archive(email_id, body.label_id)
+        gmail_client.apply_label_and_archive(email_id, body.label_id, body.account)
         return {"status": "ok"}
     except Exception as exc:
         _raise(exc)

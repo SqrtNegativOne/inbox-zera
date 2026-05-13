@@ -1,6 +1,6 @@
 <script>
-  /** @type {{ email: object, labels: Array, onLabel: (id: string) => void }} */
-  let { email, labels, onLabel } = $props()
+  /** @type {{ email: object, labels: Array, onLabel: (id: string) => void, multiAccount: boolean }} */
+  let { email, labels, onLabel, multiAccount = false } = $props()
 
   let iframeEl = $state(null)
 
@@ -8,11 +8,8 @@
     if (!iframeEl) return
     try {
       const doc = iframeEl.contentDocument || iframeEl.contentWindow?.document
-      if (doc) {
-        iframeEl.style.height = doc.documentElement.scrollHeight + 'px'
-      }
+      if (doc) iframeEl.style.height = doc.documentElement.scrollHeight + 'px'
     } catch {
-      // cross-origin fallback — srcdoc is same-origin so this rarely fires
       iframeEl.style.height = '520px'
     }
   }
@@ -20,6 +17,9 @@
 
 <article>
   <header>
+    {#if multiAccount}
+      <span class="account">{email.account}</span>
+    {/if}
     <span class="from">{email.from}</span>
     <h1 class="subject">{email.subject}</h1>
     <span class="date">{email.date}</span>
@@ -63,6 +63,16 @@
 
   header {
     margin-bottom: 28px;
+  }
+
+  .account {
+    display: block;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 0.68rem;
+    font-weight: 300;
+    color: #b8b0a6;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
   }
 
   .from {
@@ -118,7 +128,6 @@
     width: 100%;
     min-height: 120px;
     display: block;
-    font-family: 'Lora', Georgia, serif;
   }
 
   footer {
