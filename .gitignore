@@ -1,0 +1,20 @@
+# OAuth secrets — never commit these
+backend/credentials.json
+backend/token.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.python-version
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.svelte-kit/
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
